@@ -1,98 +1,97 @@
 package v1
 
+import (
+	"errors"
+	"time"
+)
+
 type Protocol interface {
 	Start(payload []byte, output chan<- []byte) (State, *Error)
 	Next(currentState State, payload []byte, output chan<- []byte) (State, *Error)
 	OnError(err *Error, output chan<- []byte) (State, *Error)
 	OnEnd(output chan<- []byte)
-	OnNonRecoverableError(*Error) error
+	OnNonRecoverableError(*Error, chan<- []byte) error
+	CurrentState() State
+	StartTimeout() <-chan time.Time
+	Timeout() <-chan time.Time
+	IncrementSequenceNumber()
+	SequenceNumber() int64
 }
 
-type ProtocolBase struct {
-	Input         <-chan []byte
-	Output        chan<- []byte
-	SupportPolicy Protocol
-}
-
-func (p *ProtocolBase) Run() error {
-	defer close(p.Output)
-
-	nextPayload := <-p.Input
-
-	nextState, err := p.SupportPolicy.Start(nextPayload, p.Output)
-
-	if err.Recoverable {
-		nextState, err = p.SupportPolicy.OnError(err, p.Output)
-	} else {
-		return p.SupportPolicy.OnNonRecoverableError(err)
+var (
+	Abort = State{
+		Name:  "Abort",
+		Start: false,
+		End:   true,
 	}
 
+	Timeout = E(errors.New("timeout"), "Timeout", "To prevent deadlock, the protocol times out after a certain period of time", false)
+)
+
+func Run(p Protocol, c chan []byte) error {
+	var (
+		nextState State
+		err       *Error
+	)
+
+	select {
+	case nextPayload := <-c:
+		{
+			nextState, err = p.Start(nextPayload, c)
+			p.IncrementSequenceNumber()
+
+			if err != nil {
+				if err.Recoverable {
+					nextState, err = p.OnError(err, c)
+				} else {
+					return p.OnNonRecoverableError(err, c)
+				}
+			}
+			if nextState.End {
+				return nil
+			}
+
+		}
+	case <-p.StartTimeout():
+		{
+			return p.OnNonRecoverableError(Timeout, c)
+		}
+	}
+
+secondLoop:
 	for {
-		nextPayload := <-p.Input
-		nextState, err = p.SupportPolicy.Next(nextState, nextPayload, p.Output)
-		if err.Recoverable {
-			nextState, err = p.SupportPolicy.OnError(err, p.Output)
-		} else {
-			return p.SupportPolicy.OnNonRecoverableError(err)
+		select {
+		case nextPayload := <-c:
+			{
+				nextState, err = p.Next(nextState, nextPayload, c)
+				p.IncrementSequenceNumber()
+				if err != nil {
+					if err.Recoverable {
+						nextState, err = p.OnError(err, c)
+					} else {
+						return p.OnNonRecoverableError(err, c)
+					}
+				}
+				if nextState.End {
+					break secondLoop
+				}
+			}
+		case <-p.Timeout():
+			return p.OnNonRecoverableError(Timeout, c)
 		}
-		if nextState.End {
-			break
-		}
-	}
-	p.SupportPolicy.OnEnd(p.Output)
 
-	nextPayload = <-p.Input
-	nextState, err = p.Start(nextPayload, p.Output)
-
-	if err.Recoverable {
-		nextState, err = p.OnError(err, p.Output)
-	} else {
-		return p.OnNonRecoverableError(err, p.Output)
 	}
-
-	for {
-		nextPayload := <-p.Input
-		nextState, err = p.Next(nextState, nextPayload, p.Output)
-		if err.Recoverable {
-			nextState, err = p.OnError(err, p.Output)
-		} else {
-			return p.OnNonRecoverableError(err, p.Output)
-		}
-		if nextState.End {
-			break
-		}
-	}
-	p.OnEnd(p.Output)
+	p.OnEnd(c)
 	return nil
-}
-
-func (p *ProtocolBase) Start(payload []byte, output chan<- []byte) (State, *Error) {
-	panic("implement me")
-}
-
-func (p *ProtocolBase) Next(currentState State, payload []byte, output chan<- []byte) (State, *Error) {
-	panic("implement me")
-}
-
-func (p *ProtocolBase) OnError(e *Error, output chan<- []byte) (State, *Error) {
-	panic("implement me")
-}
-
-func (p *ProtocolBase) OnNonRecoverableError(e *Error, output chan<- []byte) error {
-	panic("implement me")
-}
-
-func (p *ProtocolBase) OnEnd(chan<- []byte) {
-	panic("implement me")
 }
 
 type ErrorHandler func(*Error) (State, *Error)
 
 type Error struct {
-	Error       error
-	Name        string
-	Description string
-	Recoverable bool
+	Error       error  `json:"error"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Recoverable bool   `json:"recoverable"`
 }
 
 func E(error error, name, desc string, recoverable bool) *Error {
@@ -116,7 +115,7 @@ func (e *Error) WithRecoverable(r bool) *Error {
 }
 
 type State struct {
-	Name  string
-	Start bool
-	End   bool
+	Name  string `json:"name"`
+	Start bool   `json:"start"`
+	End   bool   `json:"end"`
 }
