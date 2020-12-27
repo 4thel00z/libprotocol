@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/4thel00z/libprotocol/pkg/v1"
+	"github.com/4thel00z/libprotocol/pkg/v1/policies/version"
 	"log"
+	"time"
 )
 
 func B(p string) []byte {
@@ -44,8 +46,39 @@ type Ingredient struct {
 }
 
 type MayoProtocol struct {
-	Ingredients []Ingredient
-	State       v1.State
+	SupportPolicy v1.Protocol
+	Channel       chan []byte
+	Ingredients   []Ingredient
+	State         v1.State
+}
+
+func (m *MayoProtocol) StartTimeout() <-chan time.Time {
+	return time.After(3 * time.Second)
+}
+
+func (m *MayoProtocol) Timeout() <-chan time.Time {
+	return time.After(3 * time.Second)
+}
+
+func (m *MayoProtocol) IncrementSequenceNumber() {
+	//noop
+}
+
+func (m *MayoProtocol) SequenceNumber() int64 {
+	//noop
+	return -1
+}
+
+func (m *MayoProtocol) CurrentState() v1.State {
+	return m.State
+}
+
+func (m *MayoProtocol) OnEnd(output chan<- []byte) {
+	fmt.Println("Mayonese consists of:")
+
+	for _, i := range m.Ingredients {
+		fmt.Println(i.Quantity, i.Unit, "of", i.Name)
+	}
 }
 
 var (
@@ -90,7 +123,7 @@ func (m *MayoProtocol) Next(currentState v1.State, payload []byte, output chan<-
 		if err != nil {
 			return v1.State{}, mayoWasAlreadyCookedError
 		}
-
+		fmt.Println("Received ingredient")
 		m.Ingredients = append(m.Ingredients, i)
 
 		if len(m.Ingredients) >= 3 {
@@ -121,11 +154,50 @@ func (m *MayoProtocol) OnError(e *v1.Error, output chan<- []byte) (v1.State, *v1
 	return v1.State{}, nonRecoverableMayoError.WithError(e.Error)
 }
 
-func (m *MayoProtocol) OnNonRecoverableError(e *v1.Error, output chan<- []byte) {
+func (m *MayoProtocol) OnNonRecoverableError(e *v1.Error, c chan<- []byte) error {
 	log.Fatalln(e.Name, e.Error.Error(), e.Description)
+	return e.Error
+}
+
+func MockPolicyIO(c chan []byte) {
+	req := version.VersionRequest{
+		Version: 1.0,
+	}
+
+	must(v1.Send(req, c))
+	msg := <-c
+	fmt.Println(string(msg))
 
 }
 
+func MockMayoIO(c chan []byte) {
+	for _, payload := range ingredients {
+		fmt.Println("sending", string(payload))
+		must(v1.Send(payload, c))
+		msg := <-c
+		fmt.Println(string(msg))
+	}
+
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
 func main() {
 
+	c := make(chan []byte)
+	defer close(c)
+	protocol := &MayoProtocol{
+		Channel:       c,
+		SupportPolicy: version.VersionPolicy(false, 1.0),
+	}
+
+	go MockPolicyIO(c)
+	must(v1.Run(protocol.SupportPolicy, protocol.Channel))
+	fmt.Println(protocol.SupportPolicy.CurrentState().Name)
+
+	go MockMayoIO(c)
+	must(v1.Run(protocol, protocol.Channel))
 }
